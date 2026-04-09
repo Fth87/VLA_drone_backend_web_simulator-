@@ -1,0 +1,9 @@
+[project]
+name = "backend-drone-vla-3d"
+version = "0.1.0"
+description = "Backend for simulator web 3D drone VLA (Visual Language Action)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.135.3",
+]
