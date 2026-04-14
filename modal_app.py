@@ -1,3 +1,9 @@
+from __future__ import annotations
+
+import os
+import time
+from pathlib import Path
+
 import modal
 
 
@@ -13,9 +19,7 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 download_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install(
-        "huggingface_hub[hf_transfer]>=0.30.0",
-    )
+    .pip_install("huggingface_hub[hf_transfer]>=0.30.0")
     .env(
         {
             "HF_HUB_ENABLE_HF_TRANSFER": "1",
@@ -28,19 +32,12 @@ inference_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
     .pip_install("uv>=0.8.0")
-    .env(
-        {
-            "PYTHONPATH": "/root:/root/openpi/src:/root/openpi/packages/openpi-client/src",
-        }
-    )
     .add_local_dir(OPENPI_LOCAL_DIR, remote_path="/root/openpi", copy=True)
-    .add_local_file("main.py", "/root/main.py", copy=True)
     .add_local_file("openpi_runtime.py", "/root/openpi_runtime.py", copy=True)
     .run_commands(
         "cd /root/openpi && GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-dev",
         "uv pip install --python /root/openpi/.venv/bin/python --index-url https://download.pytorch.org/whl/cu121 torch==2.4.0 torchvision torchaudio",
-        "uv pip install --python /root/openpi/.venv/bin/python pytest peft safetensors transformers==4.53.2 'fastapi[standard]>=0.135.3' numpy==1.26.4 'pillow>=11.0.0'",
-        "/root/openpi/.venv/bin/python -c \"from openpi.training import config as c; print('OpenPI configs available:', len(getattr(c, '_CONFIGS_DICT', {}))); print('pi0_drone_lite available:', 'pi0_drone_lite' in getattr(c, '_CONFIGS_DICT', {}))\"",
+        "uv pip install --python /root/openpi/.venv/bin/python peft safetensors transformers==4.53.2 'fastapi[standard]>=0.135.3' numpy==1.26.4 'pillow>=11.0.0' pytest",
     )
     .env(
         {
@@ -61,7 +58,7 @@ inference_image = (
     timeout=60 * 60,
     volumes={MOUNT_PATH: volume},
 )
-def download_model():
+def download_model() -> dict[str, object]:
     from huggingface_hub import snapshot_download
 
     snapshot_download(
@@ -79,11 +76,26 @@ def download_model():
 
 
 @app.local_entrypoint()
-def main(download: bool = False):
+def main(download: bool = False) -> None:
     if download:
         print(download_model.remote())
     else:
         print("Run `modal run modal_app.py --download` to sync the model into the Modal Volume.")
+
+
+def _parse_state_input(state_input: str) -> list[float]:
+    import numpy as np
+
+    if state_input and state_input.strip():
+        try:
+            state = np.array(state_input, dtype=np.float32)
+            if state.shape != (4,):
+                state = np.zeros(4, dtype=np.float32)
+        except Exception:
+            state = np.zeros(4, dtype=np.float32)
+    else:
+        state = np.zeros(4, dtype=np.float32)
+    return state.tolist()
 
 
 @app.cls(
@@ -95,15 +107,68 @@ def main(download: bool = False):
 )
 class InferenceAPI:
     @modal.enter()
-    def load_model(self):
-        from main import OpenPiService
-        from pathlib import Path
+    def load_model(self) -> None:
+        from openpi_runtime import create_policy, notebook_prepare_inference_runtime
 
-        self.service = OpenPiService(model_dir=Path(MODEL_DIR))
-        self.service.load()
+        checkpoint_dir = Path(os.environ.get("MODEL_DIR", MODEL_DIR))
+        self.prepared = notebook_prepare_inference_runtime(checkpoint_dir)
+        _, self.policy = create_policy(checkpoint_dir)
 
     @modal.asgi_app()
-    def fastapi_app(self):
-        from main import create_app
+    def web(self):
+        from fastapi import FastAPI, File, Form, UploadFile
+        from openpi_runtime import run_policy_inference
+        from pydantic import BaseModel
 
-        return create_app(service=self.service, load_on_startup=False)
+        class InferenceResponse(BaseModel):
+            success: bool
+            first_action: list[float] | None = None
+            trajectory: list[list[float]] | None = None
+            inference_time_ms: float | None = None
+            error: str | None = None
+
+        api = FastAPI(title="Pi0 Drone VLA Modal API", version="1.0.0")
+
+        @api.get("/health")
+        def health() -> dict[str, object]:
+            return {
+                "ready": self.policy is not None,
+                "model_dir": str(self.prepared.checkpoint_dir),
+                "asset_id": self.prepared.asset_id,
+            }
+
+        @api.post("/infer", response_model=InferenceResponse)
+        async def infer(
+            image_input: UploadFile | None = File(None),
+            task_input: str = Form(""),
+            state_input: str = Form(""),
+        ) -> InferenceResponse:
+            try:
+                if image_input is None:
+                    return InferenceResponse(success=False, error="Image required")
+
+                task = task_input.strip()
+                if not task:
+                    return InferenceResponse(success=False, error="Task required")
+
+                image_bytes = await image_input.read()
+                if not image_bytes:
+                    return InferenceResponse(success=False, error="Image required")
+
+                start = time.time()
+                actions = run_policy_inference(
+                    policy=self.policy,
+                    image_bytes=image_bytes,
+                    task=task,
+                    state=_parse_state_input(state_input),
+                )
+                return InferenceResponse(
+                    success=True,
+                    first_action=actions[0].round(4).tolist(),
+                    trajectory=actions.round(4).tolist(),
+                    inference_time_ms=round((time.time() - start) * 1000, 2),
+                )
+            except Exception as exc:
+                return InferenceResponse(success=False, error=str(exc))
+
+        return api

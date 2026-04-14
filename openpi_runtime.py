@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import io
 import logging
 import os
+import re
 import shutil
 import sys
 import urllib.request
 from pathlib import Path
+from typing import Any
+
+import numpy as np
+from PIL import Image
 
 
 logger = logging.getLogger(__name__)
@@ -58,11 +64,11 @@ class PreparedCheckpoint:
 
 
 def notebook_prepare_inference_runtime(model_dir: Path) -> PreparedCheckpoint:
-    """Run the same inference preparation stages used in `model/rapli inference.ipynb`."""
     configure_environment()
     extend_python_path()
     prepared = prepare_checkpoint_assets(model_dir)
     patch_openpi_download_datetime()
+    patch_openpi_model_loader_for_lora()
     patch_transformers_install()
     ensure_paligemma_tokenizer()
     return prepared
@@ -130,6 +136,63 @@ def patch_openpi_download_datetime() -> None:
         logger.info("Patched OpenPI download.py datetime.UTC compatibility")
 
 
+def patch_openpi_model_loader_for_lora() -> None:
+    if not OPENPI_MODEL_PY.exists():
+        return
+
+    model_text = OPENPI_MODEL_PY.read_text()
+    load_pytorch_pattern = r"def load_pytorch\(self, train_config, weight_path: str\):.*?\n\s*@abc\.abstractmethod"
+    load_pytorch_replacement = '''def load_pytorch(self, train_config, weight_path: str):
+        logger.info(f"train_config: {train_config}")
+        model = pi0_pytorch.PI0Pytorch(config=train_config.model)
+        try:
+            from peft import LoraConfig, get_peft_model
+            from safetensors.torch import load_file
+
+            lora_config = LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules="all-linear",
+                bias="none",
+            )
+            model = get_peft_model(model, lora_config)
+            state_dict = load_file(weight_path)
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            if missing_keys:
+                logger.info("LoRA checkpoint load missing keys: %d", len(missing_keys))
+            if unexpected_keys:
+                logger.info("LoRA checkpoint load unexpected keys: %d", len(unexpected_keys))
+            logger.info("Loaded checkpoint with LoRA-compatible safetensors: %s", weight_path)
+        except Exception as exc:
+            logger.warning("LoRA-compatible checkpoint load failed: %s", exc)
+            from safetensors.torch import load_model
+
+            load_model(model, weight_path)
+            logger.info("Loaded checkpoint with safetensors.torch.load_model: %s", weight_path)
+        model = model.float()
+        return model
+
+    @abc.abstractmethod'''
+
+    new_text, n_subs = re.subn(
+        load_pytorch_pattern,
+        load_pytorch_replacement,
+        model_text,
+        count=1,
+        flags=re.DOTALL,
+    )
+
+    if n_subs == 1:
+        OPENPI_MODEL_PY.write_text(new_text)
+        logger.info("Patched model.py with LoRA non-strict loader")
+    elif "PATCH LORA INFERENCE (KAGGLE)" in model_text:
+        logger.info("LoRA loader patch already applied")
+    else:
+        raise RuntimeError(
+            "Failed to patch model.py: safetensors load line not found and patch marker missing."
+        )
+
+
 def patch_transformers_install() -> None:
     if not TRANSFORMERS_PATCH_ROOT.exists():
         raise FileNotFoundError(f"OpenPI transformers patch directory not found at `{TRANSFORMERS_PATCH_ROOT}`.")
@@ -179,3 +242,35 @@ def create_policy(model_dir: Path, *, config_name: str = "pi0_drone_lite", pytor
         pytorch_device=device,
     )
     return prepared, policy
+
+
+def decode_image_bytes(image_bytes: bytes | None) -> np.ndarray:
+    if image_bytes is None:
+        image = np.zeros((224, 224, 3), dtype=np.uint8)
+        image[72:152, 72:152] = [220, 50, 50]
+        return image
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize((224, 224))
+    return np.asarray(image, dtype=np.uint8)
+
+
+def run_policy_inference(
+    *,
+    policy: Any,
+    image_bytes: bytes | None,
+    task: str,
+    state: list[float] | None = None,
+) -> np.ndarray:
+    import torch
+
+    state_vec = np.asarray(state if state is not None else [0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    if state_vec.shape != (4,):
+        state_vec = np.zeros(4, dtype=np.float32)
+
+    observation = {
+        "image": decode_image_bytes(image_bytes),
+        "state": state_vec,
+        "task": task,
+    }
+    with torch.no_grad():
+        result = policy.infer(observation)
+    return np.asarray(result["actions"], dtype=np.float32)
