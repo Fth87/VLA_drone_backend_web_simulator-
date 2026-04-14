@@ -1,7 +1,9 @@
-# Drone VLA Backend 
+# Drone VLA Backend
+
 Backend ini dipakai untuk inferensi Drone VLA dan menjadi sumber aksi untuk frontend.
 
 ## Tujuan
+
 - Menjalankan model Drone VLA dari notebook Kaggle.
 - Membuka endpoint publik untuk diakses frontend.
 
@@ -33,7 +35,7 @@ https://xxxxx.gradio.live
 
 Sesudah itu frontend dapat memanggil endpoint infer dan health pada backend yang sama.
 
-## Kontrak API 
+## Kontrak API
 
 Endpoint utama:
 
@@ -54,10 +56,9 @@ Response infer:
 - inference_time_ms
 - error
 
-## Ringkasan 
+## Ringkasan
 
 - Notebook menyiapkan dependency dan model checkpoint.
 - Runtime patch memastikan kompatibilitas OpenPI dan loader model.
 - Policy dibuat sekali lalu dipakai untuk inferensi berulang.
 - Backend publik diexpose agar frontend bisa memanggil inferensi real time.
-
