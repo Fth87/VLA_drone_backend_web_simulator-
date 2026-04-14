@@ -1,73 +1,64 @@
-# VLA Drone Inference API
+# Drone VLA Backend
 
-Backend inference API for a Vision-Language-Action (VLA) drone. Accepts a camera frame and a language instruction, returns an action vector `[vx, vy, vz, yaw]`.
+Backend ini dipakai untuk inferensi Drone VLA dan menjadi sumber aksi untuk frontend.
 
-## Requirements
+## Tujuan
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
+- Menjalankan model Drone VLA dari notebook Kaggle.
+- Membuka endpoint publik untuk diakses frontend.
 
-## Setup
+## Cara Menjalankan
 
-```bash
-uv sync
-```
+1. Buka file notebook berikut di Kaggle:
+   - [backend.ipynb](backend.ipynb)
+2. Pastikan GPU aktif.
+3. Klik Run All.
+4. Tunggu sampai backend publik aktif dan URL endpoint muncul.
+5. Salin URL publik tersebut.
+6. Tempel URL ke environment frontend sebagai base URL backend.
+7. Jalankan frontend.
 
-## Running
+## Integrasi Frontend
 
-```bash
-uv run fastapi dev main.py
-```
+Repo frontend:
 
-API is available at `http://localhost:8000`.
-Interactive docs at `http://localhost:8000/docs`.
+- https://github.com/Fth87/VLA_drone_web_simulator
 
-## Endpoints
+Frontend cukup butuh satu nilai environment:
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| POST | `/predict` | Run inference |
+- VITE_VLA_API_URL
+  - Isi dengan URL publik dari output notebook Kaggle.
 
-### POST `/predict`
+Contoh nilai:
 
-Accepts `multipart/form-data`:
+https://xxxxx.gradio.live
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `image` | file | Camera frame (any format, resized to 224x224 internally) |
-| `language_instruction` | string | Mission instruction, e.g. `"Selesaikan lintasan"` |
+Sesudah itu frontend dapat memanggil endpoint infer dan health pada backend yang sama.
 
-**Response:**
+## Kontrak API
 
-```json
-{
-  "action": {
-    "vx": 1.3437,
-    "vy": -0.0537,
-    "vz": 0.1321,
-    "yaw": -0.0514
-  },
-  "timestamp": "2026-04-09T14:56:26.351045+00:00"
-}
-```
+Endpoint utama:
 
-**Example cURL:**
+- POST /infer
+- GET atau POST /health
 
-```bash
-curl -X POST http://localhost:8000/predict \
-  -F "image=@frame.jpg" \
-  -F "language_instruction=Selesaikan lintasan"
-```
+Payload infer menggunakan multipart form data dengan field:
 
-## Testing
+- image_input (wajib)
+- task_input (wajib)
+- state_input (opsional, format list string)
 
-```bash
-uv run python test_predict.py
-```
+Response infer:
 
-## Tunnel (Cloudflare)
+- success
+- first_action
+- trajectory
+- inference_time_ms
+- error
 
-```bash
-cloudflared tunnel run --url http://localhost:8000 dronevla-backend
-```
+## Ringkasan
+
+- Notebook menyiapkan dependency dan model checkpoint.
+- Runtime patch memastikan kompatibilitas OpenPI dan loader model.
+- Policy dibuat sekali lalu dipakai untuk inferensi berulang.
+- Backend publik diexpose agar frontend bisa memanggil inferensi real time.
